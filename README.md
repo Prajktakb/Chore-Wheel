@@ -34,3 +34,6 @@ One thing AI got wrong: AI initially used standard `localStorage`, which failed 
 • Not done
 Push notifications for daily chore reminders.
 Automated weekly auto-spin trigger every Sunday midnight.
+
+<img width="799" height="471" alt="image" src="https://github.com/user-attachments/assets/e96e8d21-2e56-4420-93aa-06a68c51817c" />
+
