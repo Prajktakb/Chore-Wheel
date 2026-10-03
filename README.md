@@ -35,5 +35,18 @@ One thing AI got wrong: AI initially used standard `localStorage`, which failed 
 Push notifications for daily chore reminders.
 Automated weekly auto-spin trigger every Sunday midnight.
 
+1.Dashboard : 
 <img width="799" height="471" alt="image" src="https://github.com/user-attachments/assets/e96e8d21-2e56-4420-93aa-06a68c51817c" />
+
+2. Schedule :
+   <img width="824" height="543" alt="image" src="https://github.com/user-attachments/assets/d4e5a977-2e6b-4db2-a733-9682cbb14ade" />
+   
+3. Fun Spin wheel :
+   <img width="447" height="399" alt="image" src="https://github.com/user-attachments/assets/6c15565d-34a7-484d-902d-d1678211132f" />
+
+4. Roommates and Chores Page :
+   <img width="817" height="417" alt="image" src="https://github.com/user-attachments/assets/bf955437-6f2f-4713-bd45-bb759fefc377" />
+
+
+
 
