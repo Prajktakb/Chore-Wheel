@@ -1,0 +1,1605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>ChoreWheel — Fair chores. Zero arguments.</title>
+  
+  <!-- PWA & Theme Meta Tags -->
+  <meta name="theme-color" content="#10b981" />
+  <meta name="description" content="Fairly share household chores with roommates, even offline." />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="ChoreWheel" />
+  
+  <!-- Fonts & Icons -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#ecfdf5',
+              100: '#d1fae5',
+              500: '#10b981',
+              600: '#059669',
+              700: '#047857',
+              800: '#065f46',
+            },
+            amber: {
+              500: '#f59e0b',
+            }
+          },
+          fontFamily: {
+            sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React & Babel CDNs -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Lucide Icons & Canvas Confetti -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js"></script>
+
+  <script>
+    const manifest = {
+      "name": "ChoreWheel",
+      "short_name": "ChoreWheel",
+      "description": "Fairly share household chores, even offline.",
+      "start_url": "./",
+      "display": "standalone",
+      "background_color": "#ffffff",
+      "theme_color": "#10b981",
+      "icons": [
+        {
+          "src": "https://img.icons8.com/?size=512&id=v3C94sKz32bI&format=png",
+          "sizes": "512x512",
+          "type": "image/png",
+          "purpose": "any maskable"
+        }
+      ]
+    };
+    const stringManifest = JSON.stringify(manifest);
+    const blob = new Blob([stringManifest], {type: 'application/json'});
+    const manifestURL = URL.createObjectURL(blob);
+    const link = document.createElement('link');
+    link.rel = 'manifest';
+    link.href = manifestURL;
+    document.head.appendChild(link);
+  </script>
+
+  <style>
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(0, 0, 0, 0.05);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(16, 185, 129, 0.3);
+      border-radius: 9999px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(16, 185, 129, 0.6);
+    }
+    .touch-target {
+      min-height: 44px;
+      min-width: 44px;
+    }
+    @keyframes pulse-subtle {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.85; transform: scale(1.02); }
+    }
+    .animate-pulse-subtle {
+      animation: pulse-subtle 2s infinite ease-in-out;
+    }
+  </style>
+</head>
+<body class="bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 min-h-screen pb-20 md:pb-0 font-sans antialiased selection:bg-brand-500 selection:text-white">
+
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+    // --- IndexedDB Database Layer ---
+    const DB_NAME = 'ChoreWheelDB';
+    const DB_VERSION = 1;
+
+    const initDB = () => {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+        request.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('household')) {
+            db.createObjectStore('household', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('roommates')) {
+            db.createObjectStore('roommates', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('chores')) {
+            db.createObjectStore('chores', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('assignments')) {
+            db.createObjectStore('assignments', { keyPath: 'id' });
+          }
+          if (!db.objectStoreNames.contains('sync_queue')) {
+            db.createObjectStore('sync_queue', { keyPath: 'id', autoIncrement: true });
+          }
+        };
+
+        request.onsuccess = (e) => resolve(e.target.result);
+        request.onerror = (e) => reject(e.target.error);
+      });
+    };
+
+    const dbStore = {
+      async getAll(storeName) {
+        const db = await initDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeName, 'readonly');
+          const store = tx.objectStore(storeName);
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => reject(req.error);
+        });
+      },
+      async save(storeName, item) {
+        const db = await initDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeName, 'readwrite');
+          const store = tx.objectStore(storeName);
+          const req = store.put(item);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      },
+      async saveAll(storeName, items) {
+        const db = await initDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeName, 'readwrite');
+          const store = tx.objectStore(storeName);
+          items.forEach(item => store.put(item));
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      },
+      async delete(storeName, id) {
+        const db = await initDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeName, 'readwrite');
+          const store = tx.objectStore(storeName);
+          const req = store.delete(id);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        });
+      },
+      async clearAllStores() {
+        const db = await initDB();
+        const stores = ['household', 'roommates', 'chores', 'assignments', 'sync_queue'];
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(stores, 'readwrite');
+          stores.forEach(s => tx.objectStore(s).clear());
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      },
+      async enqueueSync(action, payload) {
+        const db = await initDB();
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction('sync_queue', 'readwrite');
+          const store = tx.objectStore('sync_queue');
+          store.add({
+            action,
+            payload,
+            timestamp: new Date().toISOString()
+          });
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+        });
+      }
+    };
+
+    const swCode = `
+      const CACHE_NAME = 'chorewheel-v1';
+      const ASSETS = [
+        './',
+        'https://cdn.tailwindcss.com',
+        'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap',
+        'https://unpkg.com/react@18/umd/react.production.min.js',
+        'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
+        'https://unpkg.com/@babel/standalone/babel.min.js',
+        'https://unpkg.com/lucide@latest',
+        'https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.2/dist/confetti.browser.min.js'
+      ];
+
+      self.addEventListener('install', (e) => {
+        e.waitUntil(
+          caches.open(CACHE_NAME).then((cache) => {
+            return cache.addAll(ASSETS).catch(err => console.warn('Cache addAll soft fail:', err));
+          }).then(() => self.skipWaiting())
+        );
+      });
+
+      self.addEventListener('activate', (e) => {
+        e.waitUntil(
+          caches.keys().then((keys) => {
+            return Promise.all(
+              keys.map((k) => k !== CACHE_NAME && caches.delete(k))
+            );
+          }).then(() => self.clients.claim())
+        );
+      });
+
+      self.addEventListener('fetch', (e) => {
+        if (e.request.method !== 'GET') return;
+        e.respondWith(
+          caches.match(e.request).then((cached) => {
+            const fetchPromise = fetch(e.request)
+              .then((netRes) => {
+                if (netRes && netRes.status === 200 && netRes.type === 'basic') {
+                  const resClone = netRes.clone();
+                  caches.open(CACHE_NAME).then(c => c.put(e.request, resClone));
+                }
+                return netRes;
+              })
+              .catch(() => cached);
+            return cached || fetchPromise;
+          })
+        );
+      });
+    `;
+
+    if ('serviceWorker' in navigator) {
+      try {
+        const swBlob = new Blob([swCode], { type: 'text/javascript' });
+        const swUrl = URL.createObjectURL(swBlob);
+        navigator.serviceWorker.register(swUrl).then(() => {
+          console.log('ChoreWheel ServiceWorker registered successfully!');
+        }).catch(err => console.log('SW registration error:', err));
+      } catch (err) {
+        console.error('SW Blob creation failed:', err);
+      }
+    }
+
+    const PRESET_CHORES = [
+      { name: "Sweep room", icon: "🧹", difficulty: "easy" },
+      { name: "Take out garbage", icon: "🗑️", difficulty: "easy" },
+      { name: "Wash dishes", icon: "🍽️", difficulty: "medium" },
+      { name: "Clean bathroom", icon: "🚿", difficulty: "hard" },
+      { name: "Mop floor", icon: "🧼", difficulty: "medium" },
+      { name: "Change bedsheets", icon: "🛏️", difficulty: "easy" },
+      { name: "Clean kitchen", icon: "🧽", difficulty: "hard" },
+      { name: "Organize room", icon: "📦", difficulty: "medium" }
+    ];
+
+    const DEMO_ROOMMATES = ["Prajkta", "Rahul", "Neha", "Amit"];
+    const DAYS_OF_WEEK = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
+
+    function App() {
+      const [isOnline, setIsOnline] = useState(navigator.onLine);
+      const [syncStatus, setSyncStatus] = useState(navigator.onLine ? 'synced' : 'offline');
+      const [activeTab, setActiveTab] = useState('dashboard');
+      
+      const [household, setHousehold] = useState(null);
+      const [roommates, setRoommates] = useState([]);
+      const [chores, setChores] = useState([]);
+      const [assignments, setAssignments] = useState([]);
+      const [syncQueue, setSyncQueue] = useState([]);
+
+      const [supabaseUrl, setSupabaseUrl] = useState(() => localStorage.getItem('cw_sp_url') || '');
+      const [supabaseKey, setSupabaseKey] = useState(() => localStorage.getItem('cw_sp_key') || '');
+      
+      const [showReadme, setShowReadme] = useState(false);
+      const [toastMsg, setToastMsg] = useState(null);
+      const [deferredPrompt, setDeferredPrompt] = useState(null);
+
+      useEffect(() => {
+        const handleOnline = () => {
+          setIsOnline(true);
+          setSyncStatus('syncing');
+          triggerSupabaseSync();
+        };
+
+        const handleOffline = () => {
+          setIsOnline(false);
+          setSyncStatus('offline');
+          showToast('Offline mode active. Changes saved locally.');
+        };
+
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+
+        window.addEventListener('beforeinstallprompt', (e) => {
+          e.preventDefault();
+          setDeferredPrompt(e);
+        });
+
+        return () => {
+          window.removeEventListener('online', handleOnline);
+          window.removeEventListener('offline', handleOffline);
+        };
+      }, []);
+
+      useEffect(() => {
+        loadLocalData();
+      }, []);
+
+      const loadLocalData = async () => {
+        try {
+          const hList = await dbStore.getAll('household');
+          const rList = await dbStore.getAll('roommates');
+          const cList = await dbStore.getAll('chores');
+          const aList = await dbStore.getAll('assignments');
+          const qList = await dbStore.getAll('sync_queue');
+
+          setRoommates(rList);
+          setChores(cList);
+          setAssignments(aList);
+          setSyncQueue(qList);
+
+          if (hList.length > 0) {
+            setHousehold(hList[0]);
+          } else if (rList.length === 0) {
+            setActiveTab('wizard');
+          }
+        } catch (err) {
+          console.error('Error loading IndexedDB data:', err);
+        }
+      };
+
+      const showToast = (text) => {
+        setToastMsg(text);
+        setTimeout(() => setToastMsg(null), 3500);
+      };
+
+      const triggerSupabaseSync = async () => {
+        if (!navigator.onLine) {
+          setSyncStatus('offline');
+          return;
+        }
+
+        const url = supabaseUrl.trim() || localStorage.getItem('cw_sp_url');
+        const key = supabaseKey.trim() || localStorage.getItem('cw_sp_key');
+
+        if (!url || !key) {
+          setSyncStatus('synced');
+          return;
+        }
+
+        setSyncStatus('syncing');
+        try {
+          const currentQueue = await dbStore.getAll('sync_queue');
+          if (currentQueue.length === 0) {
+            setSyncStatus('synced');
+            return;
+          }
+
+          for (const item of currentQueue) {
+            const tableMap = {
+              'SAVE_HOUSEHOLD': 'households',
+              'SAVE_ROOMMATES': 'roommates',
+              'SAVE_CHORES': 'chores',
+              'SAVE_ASSIGNMENTS': 'assignments',
+              'UPDATE_ASSIGNMENT': 'assignments'
+            };
+
+            const targetTable = tableMap[item.action];
+            if (targetTable) {
+              const res = await fetch(`${url}/rest/v1/${targetTable}`, {
+                method: 'POST',
+                headers: {
+                  'apikey': key,
+                  'Authorization': `Bearer ${key}`,
+                  'Content-Type': 'application/json',
+                  'Prefer': 'resolution=merge-duplicates'
+                },
+                body: JSON.stringify(item.payload)
+              });
+              
+              if (!res.ok) {
+                console.warn('Sync soft-fail response:', await res.text());
+              }
+            }
+          }
+
+          await dbStore.clearAllStores();
+          if (household) await dbStore.save('household', household);
+          await dbStore.saveAll('roommates', roommates);
+          await dbStore.saveAll('chores', chores);
+          await dbStore.saveAll('assignments', assignments);
+
+          setSyncQueue([]);
+          setSyncStatus('synced');
+          showToast('✓ Successfully synced with Supabase cloud!');
+        } catch (err) {
+          console.error('Supabase Sync error:', err);
+          setSyncStatus('offline');
+          showToast('Sync paused — will retry automatically.');
+        }
+      };
+
+      const toggleChoreCompleted = async (assignmentId) => {
+        const updated = assignments.map(a => {
+          if (a.id === assignmentId) {
+            return { ...a, completed: !a.completed, updatedAt: new Date().toISOString() };
+          }
+          return a;
+        });
+
+        setAssignments(updated);
+
+        const target = updated.find(a => a.id === assignmentId);
+        await dbStore.save('assignments', target);
+        await dbStore.enqueueSync('UPDATE_ASSIGNMENT', target);
+
+        if (!isOnline) {
+          setSyncStatus('offline');
+        } else {
+          triggerSupabaseSync();
+        }
+      };
+
+      const handleLoadDemoData = async () => {
+        const houseObj = {
+          id: 'house_demo_' + Date.now(),
+          name: "Campus Quad Apt #4",
+          createdAt: new Date().toISOString()
+        };
+
+        const demoRoommatesObj = DEMO_ROOMMATES.map(name => ({
+          id: 'rm_' + Math.random().toString(36).substr(2, 6),
+          household_id: houseObj.id,
+          name: name,
+          createdAt: new Date().toISOString()
+        }));
+
+        const demoChoresObj = PRESET_CHORES.map(c => ({
+          id: 'ch_' + Math.random().toString(36).substr(2, 6),
+          household_id: houseObj.id,
+          name: c.name,
+          icon: c.icon,
+          difficulty: c.difficulty,
+          createdAt: new Date().toISOString()
+        }));
+
+        await dbStore.clearAllStores();
+        await dbStore.save('household', houseObj);
+        await dbStore.saveAll('roommates', demoRoommatesObj);
+        await dbStore.saveAll('chores', demoChoresObj);
+
+        setHousehold(houseObj);
+        setRoommates(demoRoommatesObj);
+        setChores(demoChoresObj);
+
+        await dbStore.enqueueSync('SAVE_HOUSEHOLD', houseObj);
+        await dbStore.enqueueSync('SAVE_ROOMMATES', demoRoommatesObj);
+        await dbStore.enqueueSync('SAVE_CHORES', demoChoresObj);
+
+        const newAssign = [];
+        demoChoresObj.forEach((chore, idx) => {
+          const rm = demoRoommatesObj[idx % demoRoommatesObj.length];
+          const day = DAYS_OF_WEEK[idx % DAYS_OF_WEEK.length];
+          newAssign.push({
+            id: 'assign_demo_' + idx,
+            household_id: houseObj.id,
+            chore_id: chore.id,
+            chore_name: chore.name,
+            chore_icon: chore.icon,
+            roommate_id: rm.id,
+            roommate_name: rm.name,
+            day: day,
+            completed: idx % 3 === 0,
+            updatedAt: new Date().toISOString()
+          });
+        });
+
+        await dbStore.saveAll('assignments', newAssign);
+        setAssignments(newAssign);
+
+        showToast('🎉 Demo household loaded!');
+        setActiveTab('dashboard');
+        if (navigator.onLine) triggerSupabaseSync();
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col max-w-5xl mx-auto px-4 sm:px-6">
+          
+          <header className="py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4">
+            <div className="flex items-center space-x-3 cursor-pointer" onClick={() => setActiveTab('dashboard')}>
+              <div className="w-10 h-10 rounded-2xl bg-brand-500 text-white flex items-center justify-center font-bold text-xl shadow-lg shadow-brand-500/20">
+                🧹
+              </div>
+              <div>
+                <h1 className="font-extrabold text-xl tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
+                  ChoreWheel
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-brand-100 dark:bg-brand-900/50 text-brand-700 dark:text-brand-300 font-semibold hidden sm:inline-block">PWA</span>
+                </h1>
+                <p className="text-xs text-slate-500 dark:text-slate-400 font-medium">Fair chores. Zero arguments.</p>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <button 
+                onClick={() => setActiveTab('settings')}
+                className={`px-3 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 transition-all shadow-sm ${
+                  syncStatus === 'synced' && isOnline
+                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200/60 dark:border-emerald-800/40'
+                    : syncStatus === 'syncing'
+                    ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200/60 dark:border-blue-800/40 animate-pulse'
+                    : 'bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200/60 dark:border-amber-800/40'
+                }`}
+              >
+                <span className={`w-2 h-2 rounded-full ${
+                  syncStatus === 'synced' && isOnline ? 'bg-emerald-500' : syncStatus === 'syncing' ? 'bg-blue-500' : 'bg-amber-500'
+                }`} />
+                <span className="font-semibold">
+                  {syncStatus === 'synced' && isOnline && '🟢 Synced'}
+                  {syncStatus === 'syncing' && '🔄 Syncing...'}
+                  {!isOnline && '🟠 Offline — Local Storage'}
+                  {isOnline && syncStatus === 'offline' && '🟠 Sync Paused'}
+                </span>
+              </button>
+
+              <button
+                onClick={() => setShowReadme(true)}
+                className="p-2 text-slate-500 hover:text-brand-600 dark:hover:text-brand-400 transition"
+                title="View Project Constraints & Documentation"
+              >
+                <i data-lucide="book-open" className="w-5 h-5"></i>
+              </button>
+            </div>
+          </header>
+
+          <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/90 dark:bg-slate-900/90 backdrop-blur-lg border-t border-slate-200 dark:border-slate-800 md:relative md:border-t-0 md:bg-transparent md:my-4">
+            <div className="max-w-5xl mx-auto flex items-center justify-around md:justify-start md:space-x-2 p-2">
+              {[
+                { id: 'dashboard', label: 'Dashboard', icon: 'layout-dashboard' },
+                { id: 'schedule', label: 'Schedule', icon: 'calendar' },
+                { id: 'assign', label: 'Spin Wheel', icon: 'disc' },
+                { id: 'roommates', label: 'Roommates', icon: 'users' },
+                { id: 'settings', label: 'Settings', icon: 'settings' }
+              ].map(tab => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`flex flex-col md:flex-row items-center space-y-1 md:space-y-0 md:space-x-2 px-3 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+                    activeTab === tab.id
+                      ? 'bg-brand-500 text-white shadow-md shadow-brand-500/20'
+                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <i data-lucide={tab.icon} className="w-4 h-4 sm:w-5 sm:h-5"></i>
+                  <span>{tab.label}</span>
+                </button>
+              ))}
+            </div>
+          </nav>
+
+          {toastMsg && (
+            <div className="fixed top-16 right-4 z-50 bg-slate-900 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center space-x-2 animate-bounce border border-slate-700 text-xs sm:text-sm">
+              <span>{toastMsg}</span>
+            </div>
+          )}
+
+          {}
+          <main className="flex-1 py-4">
+            {activeTab === 'wizard' && (
+              <WizardScreen 
+                onComplete={async (houseData, roomies, choreData) => {
+                  setHousehold(houseData);
+                  setRoommates(roomies);
+                  setChores(choreData);
+                  setActiveTab('assign');
+                }} 
+                onLoadDemo={handleLoadDemoData}
+              />
+            )}
+
+            {activeTab === 'dashboard' && (
+              <DashboardScreen 
+                household={household}
+                roommates={roommates}
+                assignments={assignments}
+                onToggleDone={toggleChoreCompleted}
+                onSpinClick={() => setActiveTab('assign')}
+                onSetupClick={() => setActiveTab('wizard')}
+                onLoadDemo={handleLoadDemoData}
+              />
+            )}
+
+            {activeTab === 'schedule' && (
+              <ScheduleScreen 
+                assignments={assignments}
+                roommates={roommates}
+                onToggleDone={toggleChoreCompleted}
+              />
+            )}
+
+            {activeTab === 'assign' && (
+              <AssignWheelScreen 
+                roommates={roommates}
+                chores={chores}
+                onAssignmentsGenerated={(newList) => {
+                  setAssignments(newList);
+                  showToast("🎉 Chores distributed fairly!");
+                }}
+              />
+            )}
+
+            {activeTab === 'roommates' && (
+              <RoommatesManageScreen 
+                roommates={roommates}
+                chores={chores}
+                onAddRoommate={async (name) => {
+                  const newRm = {
+                    id: 'rm_' + Date.now(),
+                    household_id: household ? household.id : 'h_default',
+                    name: name,
+                    createdAt: new Date().toISOString()
+                  };
+                  const updated = [...roommates, newRm];
+                  setRoommates(updated);
+                  await dbStore.save('roommates', newRm);
+                  await dbStore.enqueueSync('SAVE_ROOMMATES', [newRm]);
+                  showToast(`Added ${name}!`);
+                }}
+                onRemoveRoommate={async (id) => {
+                  const updated = roommates.filter(r => r.id !== id);
+                  setRoommates(updated);
+                  await dbStore.delete('roommates', id);
+                }}
+                onAddChore={async (choreObj) => {
+                  const newCh = {
+                    id: 'ch_' + Date.now(),
+                    household_id: household ? household.id : 'h_default',
+                    ...choreObj,
+                    createdAt: new Date().toISOString()
+                  };
+                  const updated = [...chores, newCh];
+                  setChores(updated);
+                  await dbStore.save('chores', newCh);
+                  await dbStore.enqueueSync('SAVE_CHORES', [newCh]);
+                  showToast(`Added chore "${choreObj.name}"`);
+                }}
+                onRemoveChore={async (id) => {
+                  const updated = chores.filter(c => c.id !== id);
+                  setChores(updated);
+                  await dbStore.delete('chores', id);
+                }}
+              />
+            )}
+
+            {activeTab === 'settings' && (
+              <SettingsScreen 
+                supabaseUrl={supabaseUrl}
+                supabaseKey={supabaseKey}
+                syncQueueLength={syncQueue.length}
+                isOnline={isOnline}
+                deferredPrompt={deferredPrompt}
+                onSaveSupabase={async (url, key) => {
+                  setSupabaseUrl(url);
+                  setSupabaseKey(key);
+                  localStorage.setItem('cw_sp_url', url);
+                  localStorage.setItem('cw_sp_key', key);
+                  showToast('Supabase settings updated!');
+                  triggerSupabaseSync();
+                }}
+                onForceSync={triggerSupabaseSync}
+                onResetApp={async () => {
+                  if (window.confirm("Reset all local household data?")) {
+                    await dbStore.clearAllStores();
+                    setHousehold(null);
+                    setRoommates([]);
+                    setChores([]);
+                    setAssignments([]);
+                    setSyncQueue([]);
+                    setActiveTab('wizard');
+                    showToast('App reset complete.');
+                  }
+                }}
+                onLoadDemo={handleLoadDemoData}
+              />
+            )}
+          </main>
+
+          {showReadme && (
+            <ReadmeModal onClose={() => setShowReadme(false)} />
+          )}
+
+        </div>
+      );
+    }
+
+    function WizardScreen({ onComplete, onLoadDemo }) {
+      const [houseName, setHouseName] = useState('Our College Apt');
+      const [roommatesList, setRoommatesList] = useState(['Prajkta', 'Rahul', 'Neha', 'Amit']);
+      const [selectedChores, setSelectedChores] = useState(PRESET_CHORES.map(c => c.name));
+
+      const handleAddRoommate = () => {
+        if (roommatesList.length < 6) {
+          setRoommatesList([...roommatesList, `Roommate ${roommatesList.length + 1}`]);
+        }
+      };
+
+      const handleNameChange = (idx, val) => {
+        const copy = [...roommatesList];
+        copy[idx] = val;
+        setRoommatesList(copy);
+      };
+
+      const handleRemoveRoommate = (idx) => {
+        if (roommatesList.length > 2) {
+          setRoommatesList(roommatesList.filter((_, i) => i !== idx));
+        }
+      };
+
+      const toggleChore = (name) => {
+        if (selectedChores.includes(name)) {
+          setSelectedChores(selectedChores.filter(n => n !== name));
+        } else {
+          setSelectedChores([...selectedChores, name]);
+        }
+      };
+
+      const handleFinishSetup = async () => {
+        const houseObj = {
+          id: 'house_' + Date.now(),
+          name: houseName,
+          createdAt: new Date().toISOString()
+        };
+
+        const finalRoommates = roommatesList.filter(n => n.trim() !== '').map(name => ({
+          id: 'rm_' + Math.random().toString(36).substr(2, 6),
+          household_id: houseObj.id,
+          name: name.trim(),
+          createdAt: new Date().toISOString()
+        }));
+
+        const finalChores = PRESET_CHORES
+          .filter(c => selectedChores.includes(c.name))
+          .map(c => ({
+            id: 'ch_' + Math.random().toString(36).substr(2, 6),
+            household_id: houseObj.id,
+            name: c.name,
+            icon: c.icon,
+            difficulty: c.difficulty,
+            createdAt: new Date().toISOString()
+          }));
+
+        await dbStore.save('household', houseObj);
+        await dbStore.saveAll('roommates', finalRoommates);
+        await dbStore.saveAll('chores', finalChores);
+
+        await dbStore.enqueueSync('SAVE_HOUSEHOLD', houseObj);
+        await dbStore.enqueueSync('SAVE_ROOMMATES', finalRoommates);
+        await dbStore.enqueueSync('SAVE_CHORES', finalChores);
+
+        onComplete(houseObj, finalRoommates, finalChores);
+      };
+
+      return (
+        <div className="max-w-2xl mx-auto space-y-6 py-4 animate-fade-in">
+          <div className="text-center space-y-2">
+            <h2 className="text-3xl font-extrabold text-slate-900 dark:text-white">Create your ChoreWheel</h2>
+            <p className="text-slate-500 dark:text-slate-400">Fairly split household chores among roommates with zero friction.</p>
+            <div className="pt-2">
+              <button
+                onClick={onLoadDemo}
+                className="inline-flex items-center space-x-2 text-xs font-semibold px-3 py-1.5 rounded-full bg-brand-100 dark:bg-brand-900/40 text-brand-700 dark:text-brand-300 hover:bg-brand-200 transition"
+              >
+                <span>⚡ Quick Start: Load College Quad Demo Data</span>
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl shadow-xl border border-slate-200 dark:border-slate-700 space-y-6">
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">Household Name</label>
+              <input 
+                type="text" 
+                value={houseName} 
+                onChange={(e) => setHouseName(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-brand-500 outline-none"
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between items-center mb-3">
+                <label className="text-xs font-bold uppercase tracking-wider text-slate-500">Roommates ({roommatesList.length}/6)</label>
+                {roommatesList.length < 6 && (
+                  <button onClick={handleAddRoommate} className="text-xs font-bold text-brand-600 dark:text-brand-400 hover:underline">
+                    + Add Roommate
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {roommatesList.map((name, idx) => (
+                  <div key={idx} className="flex items-center space-x-2">
+                    <input 
+                      type="text" 
+                      value={name}
+                      onChange={(e) => handleNameChange(idx, e.target.value)}
+                      className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-brand-500 outline-none"
+                      placeholder={`Roommate ${idx + 1}`}
+                    />
+                    {roommatesList.length > 2 && (
+                      <button onClick={() => handleRemoveRoommate(idx)} className="text-rose-500 hover:text-rose-700 p-2 touch-target">
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">Select Household Chores</label>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {PRESET_CHORES.map((c) => {
+                  const active = selectedChores.includes(c.name);
+                  return (
+                    <button
+                      key={c.name}
+                      type="button"
+                      onClick={() => toggleChore(c.name)}
+                      className={`p-3 rounded-2xl border text-left flex flex-col items-center justify-center space-y-1 transition-all touch-target ${
+                        active 
+                          ? 'border-brand-500 bg-brand-50 dark:bg-brand-950/40 text-brand-900 dark:text-brand-200 ring-2 ring-brand-500/30'
+                          : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-600 dark:text-slate-400'
+                      }`}
+                    >
+                      <span className="text-2xl">{c.icon}</span>
+                      <span className="text-xs font-semibold text-center">{c.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <button
+              onClick={handleFinishSetup}
+              disabled={selectedChores.length === 0}
+              className="w-full py-4 rounded-2xl bg-brand-500 hover:bg-brand-600 text-white font-bold text-base shadow-lg shadow-brand-500/30 transition-all touch-target"
+            >
+              Generate ChoreWheel Setup 🎉
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function DashboardScreen({ household, roommates, assignments, onToggleDone, onSpinClick, onSetupClick, onLoadDemo }) {
+      useEffect(() => {
+        if (window.lucide) window.lucide.createIcons();
+      }, [assignments]);
+
+      if (!household || roommates.length === 0) {
+        return (
+          <div className="text-center py-12 space-y-4 max-w-md mx-auto">
+            <div className="text-6xl animate-bounce">🧹</div>
+            <h3 className="text-xl font-bold text-slate-800 dark:text-white">No Household Configured</h3>
+            <p className="text-slate-500 dark:text-slate-400 text-sm">Add roommates and chores to get started with automatic fair distribution.</p>
+            <div className="flex flex-col gap-3 pt-2">
+              <button 
+                onClick={onSetupClick}
+                className="w-full py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-white font-bold shadow-md shadow-brand-500/20"
+              >
+                Create ChoreWheel Household
+              </button>
+              <button 
+                onClick={onLoadDemo}
+                className="w-full py-3 rounded-xl bg-slate-200 dark:bg-slate-800 hover:bg-slate-300 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-semibold"
+              >
+                ⚡ Load Quick Demo Data
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      const totalChores = assignments.length;
+      const completedCount = assignments.filter(a => a.completed).length;
+      const progressPercent = totalChores > 0 ? Math.round((completedCount / totalChores) * 100) : 0;
+
+      const currentDayName = DAYS_OF_WEEK[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1];
+      const todaysChores = assignments.filter(a => a.day === currentDayName);
+
+      const countsPerRoommate = roommates.map(rm => ({
+        name: rm.name,
+        count: assignments.filter(a => a.roommate_name === rm.name).length
+      }));
+
+      return (
+        <div className="space-y-6">
+          <div className="bg-gradient-to-r from-brand-600 to-emerald-700 rounded-3xl p-6 text-white shadow-xl relative overflow-hidden">
+            <div className="relative z-10 space-y-3">
+              <div className="flex justify-between items-start">
+                <div>
+                  <span className="text-xs font-bold uppercase tracking-wider bg-white/20 px-3 py-1 rounded-full backdrop-blur-sm">
+                    {household.name}
+                  </span>
+                  <h2 className="text-2xl sm:text-3xl font-extrabold mt-2">Current Week Schedule</h2>
+                </div>
+                <button 
+                  onClick={onSpinClick}
+                  className="px-4 py-2 bg-white text-brand-700 hover:bg-brand-50 rounded-2xl font-bold text-xs sm:text-sm shadow-md transition touch-target flex items-center space-x-1"
+                >
+                  <span>🎡 Spin Wheel</span>
+                </button>
+              </div>
+
+              <div className="pt-2">
+                <div className="flex justify-between text-xs font-semibold mb-1">
+                  <span>Completion Progress</span>
+                  <span>{completedCount} / {totalChores} Chores Completed ({progressPercent}%)</span>
+                </div>
+                <div className="w-full h-3 bg-brand-800/60 rounded-full overflow-hidden p-0.5 border border-white/10">
+                  <div 
+                    className="h-full bg-emerald-300 rounded-full transition-all duration-500 shadow-sm"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 shadow-md border border-slate-200 dark:border-slate-700 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <span>TODAY ({currentDayName})</span>
+              </h3>
+              <span className="text-xs text-slate-500 font-medium">{todaysChores.length} tasks scheduled</span>
+            </div>
+
+            {todaysChores.length === 0 ? (
+              <div className="p-6 text-center text-slate-400 bg-slate-50 dark:bg-slate-900/50 rounded-2xl border border-dashed border-slate-200 dark:border-slate-700">
+                ✨ No chores assigned for today! Enjoy your day off.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {todaysChores.map(item => (
+                  <div 
+                    key={item.id}
+                    className={`p-4 rounded-2xl border flex items-center justify-between transition-all ${
+                      item.completed 
+                        ? 'bg-slate-50 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 opacity-60' 
+                        : 'bg-brand-50/50 dark:bg-brand-950/20 border-brand-200 dark:border-brand-800'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-3">
+                      <span className="text-3xl">{item.chore_icon || '🧹'}</span>
+                      <div>
+                        <h4 className={`font-bold text-sm text-slate-900 dark:text-white ${item.completed ? 'line-through' : ''}`}>
+                          {item.chore_name}
+                        </h4>
+                        <p className="text-xs text-brand-700 dark:text-brand-400 font-semibold mt-0.5">
+                          Assigned to: <span className="underline">{item.roommate_name}</span>
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => onToggleDone(item.id)}
+                      className={`px-3 py-2 rounded-xl text-xs font-bold transition touch-target flex items-center space-x-1 ${
+                        item.completed
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-white dark:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-600 hover:bg-brand-500 hover:text-white'
+                      }`}
+                    >
+                      {item.completed ? '✓ Done' : '○ Mark Done'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 shadow-md border border-slate-200 dark:border-slate-700 space-y-3">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-500">Fairness Workload Balance</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {countsPerRoommate.map(rm => (
+                <div key={rm.name} className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-center">
+                  <div className="font-extrabold text-lg text-slate-900 dark:text-white">{rm.count} Chores</div>
+                  <div className="text-xs font-semibold text-slate-500">{rm.name}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 shadow-md border border-slate-200 dark:border-slate-700 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 dark:text-white">THIS WEEK</h3>
+            <div className="space-y-3">
+              {DAYS_OF_WEEK.map(day => {
+                const dayChores = assignments.filter(a => a.day === day);
+                return (
+                  <div key={day} className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700/80 gap-2">
+                    <span className="text-xs font-black uppercase tracking-wider text-slate-400 w-24">{day}</span>
+                    <div className="flex-1 flex flex-wrap gap-2">
+                      {dayChores.length === 0 ? (
+                        <span className="text-xs text-slate-400 font-medium">✨ Free Day</span>
+                      ) : (
+                        dayChores.map(c => (
+                          <span 
+                            key={c.id} 
+                            onClick={() => onToggleDone(c.id)}
+                            className={`text-xs px-2.5 py-1 rounded-xl font-semibold cursor-pointer transition flex items-center space-x-1 ${
+                              c.completed 
+                                ? 'bg-emerald-100 text-emerald-800 line-through dark:bg-emerald-950/80 dark:text-emerald-300' 
+                                : 'bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 shadow-sm'
+                            }`}
+                          >
+                            <span>{c.chore_icon} {c.chore_name} → <strong className="text-brand-600 dark:text-brand-400">{c.roommate_name}</strong></span>
+                            <span>{c.completed ? '✓' : ''}</span>
+                          </span>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+        </div>
+      );
+    }
+
+    function ScheduleScreen({ assignments, roommates, onToggleDone }) {
+      const [filterRoommate, setFilterRoommate] = useState('ALL');
+
+      const filtered = filterRoommate === 'ALL'
+        ? assignments
+        : assignments.filter(a => a.roommate_name === filterRoommate);
+
+      return (
+        <div className="space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-2xl font-extrabold text-slate-900 dark:text-white">Weekly Schedule</h2>
+              <p className="text-xs text-slate-500">Filter by roommate or mark chores as complete on the go.</p>
+            </div>
+
+            <div className="flex items-center space-x-1 overflow-x-auto pb-2 sm:pb-0">
+              <button
+                onClick={() => setFilterRoommate('ALL')}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
+                  filterRoommate === 'ALL' 
+                    ? 'bg-brand-500 text-white shadow' 
+                    : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                }`}
+              >
+                All Roommates
+              </button>
+              {roommates.map(rm => (
+                <button
+                  key={rm.id}
+                  onClick={() => setFilterRoommate(rm.name)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap ${
+                    filterRoommate === rm.name 
+                      ? 'bg-brand-500 text-white shadow' 
+                      : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200 dark:border-slate-700'
+                  }`}
+                >
+                  {rm.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {DAYS_OF_WEEK.map(day => {
+              const dayItems = filtered.filter(a => a.day === day);
+              return (
+                <div key={day} className="bg-white dark:bg-slate-800 rounded-2xl p-5 border border-slate-200 dark:border-slate-700 shadow-sm space-y-3">
+                  <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-700 pb-2">
+                    <span className="font-extrabold text-sm text-brand-600 dark:text-brand-400">{day}</span>
+                    <span className="text-xs font-medium text-slate-400">{dayItems.length} assigned</span>
+                  </div>
+
+                  {dayItems.length === 0 ? (
+                    <p className="text-xs text-slate-400 italic py-2">No chores for this filter.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {dayItems.map(item => (
+                        <div key={item.id} className="flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200/60 dark:border-slate-700/60">
+                          <div className="flex items-center space-x-2">
+                            <span className="text-xl">{item.chore_icon}</span>
+                            <div>
+                              <div className={`text-xs font-bold text-slate-800 dark:text-slate-100 ${item.completed ? 'line-through opacity-60' : ''}`}>
+                                {item.chore_name}
+                              </div>
+                              <div className="text-[10px] text-slate-500 font-medium">Assigned to {item.roommate_name}</div>
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => onToggleDone(item.id)}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-bold transition touch-target ${
+                              item.completed
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-600'
+                            }`}
+                          >
+                            {item.completed ? '✓ Done' : '○ Mark Done'}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    function AssignWheelScreen({ roommates, chores, onAssignmentsGenerated }) {
+      const canvasRef = useRef(null);
+      const [isSpinning, setIsSpinning] = useState(false);
+      const [assignedResults, setAssignedResults] = useState(null);
+
+      useEffect(() => {
+        if (!canvasRef.current || roommates.length === 0) return;
+        const canvas = canvasRef.current;
+        const ctx = canvas.getContext('2d');
+        const width = canvas.width;
+        const height = canvas.height;
+        const centerX = width / 2;
+        const centerY = height / 2;
+        const radius = width / 2 - 10;
+
+        ctx.clearRect(0, 0, width, height);
+
+        const colors = ['#10b981', '#f59e0b', '#3b82f6', '#8b5cf6', '#ec4899', '#14b8a6'];
+        const sliceAngle = (2 * Math.PI) / roommates.length;
+
+        roommates.forEach((rm, i) => {
+          const angle = i * sliceAngle;
+          ctx.beginPath();
+          ctx.fillStyle = colors[i % colors.length];
+          ctx.moveTo(centerX, centerY);
+          ctx.arc(centerX, centerY, radius, angle, angle + sliceAngle);
+          ctx.closePath();
+          ctx.fill();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = '#ffffff';
+          ctx.stroke();
+
+          ctx.save();
+          ctx.translate(centerX, centerY);
+          ctx.rotate(angle + sliceAngle / 2);
+          ctx.textAlign = 'right';
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 14px "Plus Jakarta Sans"';
+          ctx.fillText(rm.name, radius - 20, 5);
+          ctx.restore();
+        });
+
+        ctx.beginPath();
+        ctx.arc(centerX, centerY, 18, 0, 2 * Math.PI);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.strokeStyle = '#00000020';
+        ctx.stroke();
+      }, [roommates]);
+
+      const handleSpinWheel = async () => {
+        if (isSpinning || roommates.length === 0 || chores.length === 0) return;
+        setIsSpinning(true);
+        setAssignedResults(null);
+
+        const canvas = canvasRef.current;
+        const randomDegree = 1800 + Math.floor(Math.random() * 360);
+        canvas.style.transition = 'transform 3s cubic-bezier(0.15, 0.85, 0.35, 1.2)';
+        canvas.style.transform = `rotate(${randomDegree}deg)`;
+
+        setTimeout(async () => {
+          setIsSpinning(false);
+          const newAssignments = [];
+          const numRm = roommates.length;
+          
+          const shuffledRm = [...roommates].sort(() => Math.random() - 0.5);
+          chores.forEach((c, idx) => {
+            const rm = shuffledRm[idx % numRm];
+            const day = DAYS_OF_WEEK[idx % DAYS_OF_WEEK.length];
+            newAssignments.push({
+              id: 'assign_' + Date.now() + '_' + idx,
+              household_id: 'h_main',
+              chore_id: c.id,
+              chore_name: c.name,
+              chore_icon: c.icon,
+              roommate_id: rm.id,
+              roommate_name: rm.name,
+              day: day,
+              completed: false,
+              updatedAt: new Date().toISOString()
+            });
+          });
+
+          await dbStore.saveAll('assignments', newAssignments);
+          await dbStore.enqueueSync('SAVE_ASSIGNMENTS', newAssignments);
+
+          setAssignedResults(newAssignments);
+          onAssignmentsGenerated(newAssignments);
+
+          if (window.confetti) {
+            window.confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 } });
+          }
+        }, 3100);
+      };
+
+      return (
+        <div className="max-w-xl mx-auto space-y-6 text-center py-4">
+          <div>
+            <h2 className="text-2xl font-extrabold text-slate-900 dark:text-white">Fair Chore Assignment</h2>
+            <p className="text-xs text-slate-500">Spin the wheel to automatically balance chores fairly among all roommates.</p>
+          </div>
+
+          <div className="relative inline-block my-4">
+            <div className="absolute -top-3 left-1/2 -translate-x-1/2 z-20 text-3xl drop-shadow">
+              🔻
+            </div>
+
+            <canvas
+              ref={canvasRef}
+              width={280}
+              height={280}
+              className="mx-auto rounded-full shadow-2xl border-4 border-white dark:border-slate-800"
+            />
+          </div>
+
+          <div>
+            <button
+              onClick={handleSpinWheel}
+              disabled={isSpinning || roommates.length === 0}
+              className={`px-8 py-4 rounded-2xl bg-brand-500 hover:bg-brand-600 text-white font-extrabold text-lg shadow-xl shadow-brand-500/30 transition-all touch-target ${
+                isSpinning ? 'opacity-50 cursor-not-allowed animate-pulse' : ''
+              }`}
+            >
+              {isSpinning ? '🎡 Assigning Chores...' : '🎯 Spin & Assign Chores'}
+            </button>
+          </div>
+
+          {assignedResults && (
+            <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-700 text-left space-y-3 animate-fade-in">
+              <h3 className="font-bold text-sm uppercase tracking-wider text-slate-500">New Schedule Generated</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {assignedResults.map(res => (
+                  <div key={res.id} className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900 text-xs flex items-center justify-between">
+                    <span>{res.chore_icon} {res.chore_name}</span>
+                    <span className="font-bold text-brand-600 dark:text-brand-400">→ {res.roommate_name} ({res.day.slice(0, 3)})</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function RoommatesManageScreen({ roommates, chores, onAddRoommate, onRemoveRoommate, onAddChore, onRemoveChore }) {
+      const [newRoomie, setNewRoomie] = useState('');
+      const [newChoreName, setNewChoreName] = useState('');
+      const [newChoreIcon, setNewChoreIcon] = useState('🧹');
+
+      const handleAddRM = (e) => {
+        e.preventDefault();
+        if (newRoomie.trim()) {
+          onAddRoommate(newRoomie.trim());
+          setNewRoomie('');
+        }
+      };
+
+      const handleAddC = (e) => {
+        e.preventDefault();
+        if (newChoreName.trim()) {
+          onAddChore({ name: newChoreName.trim(), icon: newChoreIcon, difficulty: 'medium' });
+          setNewChoreName('');
+        }
+      };
+
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-700 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 dark:text-white">Roommates ({roommates.length})</h3>
+            
+            <form onSubmit={handleAddRM} className="flex gap-2">
+              <input
+                type="text"
+                value={newRoomie}
+                onChange={(e) => setNewRoomie(e.target.value)}
+                placeholder="Roommate name..."
+                className="flex-1 px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+              />
+              <button type="submit" className="px-4 py-2 bg-brand-500 text-white font-bold rounded-xl text-xs hover:bg-brand-600 touch-target">
+                + Add
+              </button>
+            </form>
+
+            <div className="space-y-2">
+              {roommates.map(rm => (
+                <div key={rm.id} className="flex justify-between items-center p-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200/60 dark:border-slate-700/60 text-sm font-semibold">
+                  <span>👤 {rm.name}</span>
+                  {roommates.length > 2 && (
+                    <button onClick={() => onRemoveRoommate(rm.id)} className="text-rose-500 hover:text-rose-700 text-xs px-2 py-1">
+                      Remove
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-700 space-y-4">
+            <h3 className="text-lg font-bold text-slate-900 dark:text-white">Household Chores ({chores.length})</h3>
+
+            <form onSubmit={handleAddC} className="flex gap-2">
+              <select
+                value={newChoreIcon}
+                onChange={(e) => setNewChoreIcon(e.target.value)}
+                className="px-2 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-base"
+              >
+                {['🧹', '🗑️', '🍽️', '🚿', '🧼', '🛏️', '🧽', '📦', '🧺', '🐶'].map(emoji => (
+                  <option key={emoji} value={emoji}>{emoji}</option>
+                ))}
+              </select>
+              <input
+                type="text"
+                value={newChoreName}
+                onChange={(e) => setNewChoreName(e.target.value)}
+                placeholder="Custom chore name..."
+                className="flex-1 px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm outline-none focus:ring-2 focus:ring-brand-500"
+              />
+              <button type="submit" className="px-4 py-2 bg-brand-500 text-white font-bold rounded-xl text-xs hover:bg-brand-600 touch-target">
+                + Add
+              </button>
+            </form>
+
+            <div className="space-y-2 max-h-80 overflow-y-auto">
+              {chores.map(c => (
+                <div key={c.id} className="flex justify-between items-center p-3 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200/60 dark:border-slate-700/60 text-sm font-semibold">
+                  <span>{c.icon} {c.name}</span>
+                  <button onClick={() => onRemoveChore(c.id)} className="text-rose-500 hover:text-rose-700 text-xs px-2 py-1">
+                    Delete
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function SettingsScreen({ supabaseUrl, supabaseKey, syncQueueLength, isOnline, deferredPrompt, onSaveSupabase, onForceSync, onResetApp, onLoadDemo }) {
+      const [urlInput, setUrlInput] = useState(supabaseUrl);
+      const [keyInput, setKeyInput] = useState(supabaseKey);
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        onSaveSupabase(urlInput, keyInput);
+      };
+
+      const handlePromptInstall = () => {
+        if (deferredPrompt) {
+          deferredPrompt.prompt();
+        }
+      };
+
+      return (
+        <div className="max-w-2xl mx-auto space-y-6">
+          <div>
+            <h2 className="text-2xl font-extrabold text-slate-900 dark:text-white">Settings & Offline Sync Inspector</h2>
+            <p className="text-xs text-slate-500">Configure optional Supabase backend credentials or inspect local IndexedDB storage.</p>
+          </div>
+
+          <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-700 space-y-4 shadow-sm">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-500">System Network & Queue Status</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700/80 flex justify-between items-center">
+                <span className="text-xs font-semibold text-slate-600 dark:text-slate-400">Connection State</span>
+                <span className={`text-xs font-bold px-2.5 py-1 rounded-lg ${isOnline ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
+                  {isOnline ? '🟢 Online' : '🟠 Offline'}
+                </span>
+              </div>
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-700/80 flex justify-between items-center">
+                <span className="text-xs font-semibold text-slate-600 dark:text-slate-400">Sync Queue Items</span>
+                <span className="text-xs font-bold px-2.5 py-1 rounded-lg bg-blue-100 text-blue-800">
+                  {syncQueueLength} Pending
+                </span>
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                onClick={onForceSync}
+                disabled={!isOnline}
+                className="flex-1 py-3 bg-brand-500 text-white font-bold rounded-xl text-xs hover:bg-brand-600 disabled:opacity-50 shadow-sm touch-target"
+              >
+                🔄 Force Sync Now
+              </button>
+              {deferredPrompt && (
+                <button
+                  onClick={handlePromptInstall}
+                  className="flex-1 py-3 bg-indigo-600 text-white font-bold rounded-xl text-xs hover:bg-indigo-700 shadow-sm touch-target"
+                >
+                  📱 Install PWA App
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-700 space-y-4 shadow-sm">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-500">Supabase Connection (Optional)</h3>
+            <form onSubmit={handleSubmit} className="space-y-3">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">VITE_SUPABASE_URL</label>
+                <input
+                  type="text"
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  placeholder="https://your-project.supabase.co"
+                  className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono outline-none focus:ring-2 focus:ring-brand-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 dark:text-slate-400 mb-1">VITE_SUPABASE_ANON_KEY</label>
+                <input
+                  type="password"
+                  value={keyInput}
+                  onChange={(e) => setKeyInput(e.target.value)}
+                  placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                  className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono outline-none focus:ring-2 focus:ring-brand-500"
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-3 bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 font-bold rounded-xl text-xs hover:opacity-90 transition touch-target"
+              >
+                Save Credentials
+              </button>
+            </form>
+          </div>
+
+          <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-700 space-y-3 shadow-sm">
+            <h3 className="text-sm font-bold uppercase tracking-wider text-slate-500">Demo Data & Danger Zone</h3>
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                onClick={onLoadDemo}
+                className="flex-1 py-3 bg-brand-50 dark:bg-brand-950/40 text-brand-700 dark:text-brand-300 border border-brand-200 font-bold rounded-xl text-xs hover:bg-brand-100 touch-target"
+              >
+                ⚡ Reload Demo Quad Household
+              </button>
+              <button
+                onClick={onResetApp}
+                className="flex-1 py-3 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300 border border-rose-200 font-bold rounded-xl text-xs hover:bg-rose-100 touch-target"
+              >
+                🗑️ Reset All Local Data
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function ReadmeModal({ onClose }) {
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto animate-fade-in">
+          <div className="bg-white dark:bg-slate-800 w-full max-w-3xl rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl my-8 border border-slate-200 dark:border-slate-700 max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center border-b border-slate-200 dark:border-slate-700 pb-4">
+              <h2 className="text-xl font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
+                <span>📖 Project README Documentation</span>
+              </h2>
+              <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-white text-lg font-bold touch-target">
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-6 text-sm text-slate-600 dark:text-slate-300 leading-relaxed font-sans">
+              <section className="space-y-2">
+                <h3 className="text-base font-extrabold text-slate-900 dark:text-white">ChoreWheel</h3>
+                <h4 className="font-bold text-slate-800 dark:text-slate-200">The annoyance</h4>
+                <p>
+                  Roommates often forget chores, argue about who should do them, and repeatedly ask each other who is responsible.
+                </p>
+              </section>
+
+              <section className="space-y-2">
+                <h4 className="font-bold text-slate-800 dark:text-slate-200">The constraint</h4>
+                <p>
+                  My PRN constraint was <strong>#2 — Offline</strong>.<br />
+                  The app therefore works after the first visit even when Wi-Fi is turned off. The app uses IndexedDB and a service worker for offline functionality and Supabase for server-side storage and synchronization.
+                </p>
+              </section>
+
+              <section className="space-y-2">
+                <h4 className="font-bold text-slate-800 dark:text-slate-200">The great part</h4>
+                <p>
+                  The offline-first experience is the most important part because chores should still be manageable even when there is no internet connection.
+                </p>
+              </section>
+
+              <section className="space-y-2 border-t border-slate-200 dark:border-slate-700 pt-4">
+                <h4 className="font-bold text-slate-800 dark:text-slate-200">Two testers</h4>
+                <div className="p-3 bg-slate-50 dark:bg-slate-900 rounded-xl space-y-1">
+                  <p className="font-semibold text-slate-800 dark:text-slate-200">Tester 1:</p>
+                  <p><strong>Where they got stuck:</strong> [Placeholders to fill after testing]</p>
+                  <p><strong>What I changed:</strong> [Placeholders to fill after testing]</p>
+                </div>
+                <div className="p-3 bg-slate-50 dark:bg-slate-900 rounded-xl space-y-1">
+                  <p className="font-semibold text-slate-800 dark:text-slate-200">Tester 2:</p>
+                  <p><strong>Where they got stuck:</strong> [Placeholders to fill after testing]</p>
+                  <p><strong>What I changed:</strong> [Placeholders to fill after testing]</p>
+                </div>
+              </section>
+
+              <section className="space-y-2">
+                <h4 className="font-bold text-slate-800 dark:text-slate-200">AI</h4>
+                <p>I used AI to help with:</p>
+                <ul className="list-disc list-inside space-y-1 pl-2">
+                  <li>generating the initial UI</li>
+                  <li>writing components</li>
+                  <li>implementing offline storage</li>
+                  <li>debugging</li>
+                </ul>
+                <p className="pt-1"><strong>One thing AI got wrong:</strong></p>
+                <p className="italic bg-slate-50 dark:bg-slate-900 p-3 rounded-xl">[I will write this after testing]</p>
+              </section>
+
+              <section className="space-y-2">
+                <h4 className="font-bold text-slate-800 dark:text-slate-200">Not done</h4>
+                <p className="italic bg-slate-50 dark:bg-slate-900 p-3 rounded-xl">[List anything unfinished]</p>
+              </section>
+
+              <section className="space-y-2 border-t border-slate-200 dark:border-slate-700 pt-4">
+                <h4 className="font-bold text-slate-800 dark:text-slate-200">Run locally</h4>
+                <pre className="bg-slate-900 text-slate-100 p-4 rounded-xl text-xs font-mono">
+npm install
+npm run dev
+
+Environment variables:
+VITE_SUPABASE_URL
+VITE_SUPABASE_ANON_KEY
+                </pre>
+              </section>
+            </div>
+
+            <div className="pt-4 border-t border-slate-200 dark:border-slate-700 text-right">
+              <button
+                onClick={onClose}
+                className="px-6 py-2.5 bg-brand-500 text-white font-bold rounded-xl text-xs hover:bg-brand-600 transition touch-target"
+              >
+                Close README
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
